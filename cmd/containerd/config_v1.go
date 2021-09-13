@@ -34,7 +34,7 @@ func newConfigV1(cfg *toml.Tree) UpdateReverter {
 			Tree:      cfg,
 			version:   1,
 			cri:       "cri",
-			binaryKey: "Runtime",
+			binaryKey: "BinaryName",
 		},
 	}
 
@@ -77,10 +77,10 @@ func (config *configV1) Update(o *options) error {
 func (config *configV1) Revert(o *options) error {
 	defaultRuntimePath := append(config.containerdPath(), "default_runtime")
 	defaultRuntimeOptionsPath := append(defaultRuntimePath, "options")
-	if runtime, ok := config.GetPath(append(defaultRuntimeOptionsPath, "Runtime")).(string); ok {
+	if runtime, ok := config.GetPath(append(defaultRuntimeOptionsPath, config.binaryKey)).(string); ok {
 		for _, runtimeBinary := range o.getRuntimeBinaries() {
 			if path.Base(runtimeBinary) == path.Base(runtime) {
-				config.DeletePath(append(defaultRuntimeOptionsPath, "Runtime"))
+				config.DeletePath(append(defaultRuntimeOptionsPath, config.binaryKey))
 				break
 			}
 		}

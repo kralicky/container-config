@@ -17,10 +17,10 @@ ARG CUDA_VERSION
 FROM ubuntu:20.04 as build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        g++ \
-        git \
-        ca-certificates \
-        wget && \
+    g++ \
+    git \
+    ca-certificates \
+    wget && \
     rm -rf /var/lib/apt/lists/*
 
 ARG GOLANG_VERSION=x.x.x
@@ -57,7 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG BASE_DIST
 RUN curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | apt-key add - && \
     curl -s -L "https://nvidia.github.io/nvidia-docker/${BASE_DIST}/nvidia-docker.list" | \
-        tee /etc/apt/sources.list.d/nvidia-docker.list
+    tee /etc/apt/sources.list.d/nvidia-docker.list
 
 ARG LIBNVIDIA_CONTAINER_VERSION
 ARG NVIDIA_CONTAINER_TOOLKIT_VERSION
@@ -73,6 +73,16 @@ RUN /bin/bash -c " \
     nvidia-container-runtime=\${NVIDIA_CONTAINER_RUNTIME_VERSION/-/\~}-1"
 
 RUN rm -rf /var/lib/apt/lists/*
+
+FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
+
+ENV NVIDIA_DISABLE_REQUIRE="true"
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=utility
+
+COPY --from=artifacts /usr/bin/nvidia-container-* /usr/bin/
+COPY --from=artifacts /etc/nvidia-container-runtime/config.toml /etc/nvidia-container-runtime/config.toml
+COPY --from=artifacts /usr/lib/x86_64-linux-gnu/libnvidia-container.so* /usr/lib/x86_64-linux-gnu/
 
 WORKDIR /work
 

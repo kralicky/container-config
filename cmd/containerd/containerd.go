@@ -305,22 +305,11 @@ func LoadConfig(config string) (*toml.Tree, error) {
 
 // ParseVersion parses the version field out of the containerd config
 func ParseVersion(config *toml.Tree, useLegacyConfig bool) (int, error) {
-	var defaultVersion int
-	if !useLegacyConfig {
-		defaultVersion = 2
-	} else {
-		defaultVersion = 1
-	}
-
 	var version int
 	switch v := config.Get("version").(type) {
 	case nil:
-		switch len(config.Keys()) {
-		case 0: // No config exists, or the config file is empty, use version inferred from containerd
-			version = defaultVersion
-		default: // A config file exists, has content, and no version is set
-			version = 1
-		}
+		// Config version is parsed as v1 by default
+		version = 1
 	case int64:
 		version = int(v)
 	default:
