@@ -195,7 +195,7 @@ func Setup(c *cli.Context, o *options) error {
 	}
 	o.runtimeDir = runtimeDir
 
-	cfg, err := LoadConfig(o.config)
+	cfg, err := LoadConfig(o)
 	if err != nil {
 		return fmt.Errorf("unable to load config: %v", err)
 	}
@@ -234,7 +234,7 @@ func Cleanup(c *cli.Context, o *options) error {
 		return fmt.Errorf("unable to parse args: %v", err)
 	}
 
-	cfg, err := LoadConfig(o.config)
+	cfg, err := LoadConfig(o)
 	if err != nil {
 		return fmt.Errorf("unable to load config: %v", err)
 	}
@@ -278,22 +278,53 @@ func ParseArgs(c *cli.Context) (string, error) {
 	return runtimeDir, nil
 }
 
-// LoadConfig loads the containerd config from disk
-func LoadConfig(config string) (*toml.Tree, error) {
-	log.Infof("Loading config: %v", config)
+func createDefaultConfig(o *options) error {
+	filename := o.config
+	// Ensure the parent directory exists
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		return fmt.Errorf("unable to create config directory: %v", err)
+	}
 
-	info, err := os.Stat(config)
+	// Find the containerd process attached to the socket, and use the same
+	// binary to generate the default config
+	pid, err := findRunningContainerdPID(o.socket)
+	if err != nil {
+		return fmt.Errorf("unable to find running containerd process: %v", err)
+	}
+
+	// create the default config
+	cmd := exec.Command(fmt.Sprintf("/proc/%d/exe", pid), "config", "default")
+	configData, err := cmd.Output()
+	if err != nil {
+		return err
+	}
+
+	// write the default config to config.toml
+	if err := os.WriteFile(filename, configData, 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
+// LoadConfig loads the containerd config from disk. If it does not exist,
+// it will first be created with the default config generated from the
+// currently running containerd binary.
+func LoadConfig(o *options) (*toml.Tree, error) {
+	log.Infof("Loading config: %v", o.config)
+
+	info, err := os.Stat(o.config)
 	if os.IsExist(err) && info.IsDir() {
 		return nil, fmt.Errorf("config file is a directory")
 	}
 
-	configFile := config
 	if os.IsNotExist(err) {
-		configFile = "/dev/null"
 		log.Infof("Config file does not exist, creating new one")
+		if err := createDefaultConfig(o); err != nil {
+			return nil, fmt.Errorf("unable to create default config: %v", err)
+		}
 	}
 
-	cfg, err := toml.LoadFile(configFile)
+	cfg, err := toml.LoadFile(o.config)
 	if err != nil {
 		return nil, err
 	}
@@ -444,67 +475,72 @@ func RestartContainerd(o *options) error {
 	return nil
 }
 
+func findRunningContainerdPID(socket string) (int32, error) {
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		return 0, fmt.Errorf("unable to dial: %v", err)
+	}
+	defer conn.Close()
+
+	sconn, err := conn.(*net.UnixConn).SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("unable to get syscall connection: %v", err)
+	}
+
+	err1 := sconn.Control(func(fd uintptr) {
+		err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_PASSCRED, 1)
+	})
+	if err1 != nil {
+		return 0, fmt.Errorf("unable to issue call on socket fd: %v", err1)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("unable to SetsockoptInt on socket fd: %v", err)
+	}
+
+	_, _, err = conn.(*net.UnixConn).WriteMsgUnix([]byte(socketMessageToGetPID), nil, nil)
+	if err != nil {
+		return 0, fmt.Errorf("unable to WriteMsgUnix on socket fd: %v", err)
+	}
+
+	oob := make([]byte, 1024)
+	_, oobn, _, _, err := conn.(*net.UnixConn).ReadMsgUnix(nil, oob)
+	if err != nil {
+		return 0, fmt.Errorf("unable to ReadMsgUnix on socket fd: %v", err)
+	}
+
+	oob = oob[:oobn]
+	scm, err := syscall.ParseSocketControlMessage(oob)
+	if err != nil {
+		return 0, fmt.Errorf("unable to ParseSocketControlMessage from message received on socket fd: %v", err)
+	}
+
+	ucred, err := syscall.ParseUnixCredentials(&scm[0])
+	if err != nil {
+		return 0, fmt.Errorf("unable to ParseUnixCredentials from message received on socket fd: %v", err)
+	}
+	return ucred.Pid, nil
+}
+
 // SignalContainerd sends a SIGHUP signal to the containerd daemon
 func SignalContainerd(o *options) error {
 	log.Infof("Sending SIGHUP signal to containerd")
 
 	// Wrap the logic to perform the SIGHUP in a function so we can retry it on failure
-	retriable := func() error {
-		conn, err := net.Dial("unix", o.socket)
+	tryKillContainerd := func() error {
+		pid, err := findRunningContainerdPID(o.socket)
 		if err != nil {
-			return fmt.Errorf("unable to dial: %v", err)
+			return fmt.Errorf("unable to find containerd PID: %v", err)
 		}
-		defer conn.Close()
-
-		sconn, err := conn.(*net.UnixConn).SyscallConn()
-		if err != nil {
-			return fmt.Errorf("unable to get syscall connection: %v", err)
-		}
-
-		err1 := sconn.Control(func(fd uintptr) {
-			err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_PASSCRED, 1)
-		})
-		if err1 != nil {
-			return fmt.Errorf("unable to issue call on socket fd: %v", err1)
-		}
-		if err != nil {
-			return fmt.Errorf("unable to SetsockoptInt on socket fd: %v", err)
-		}
-
-		_, _, err = conn.(*net.UnixConn).WriteMsgUnix([]byte(socketMessageToGetPID), nil, nil)
-		if err != nil {
-			return fmt.Errorf("unable to WriteMsgUnix on socket fd: %v", err)
-		}
-
-		oob := make([]byte, 1024)
-		_, oobn, _, _, err := conn.(*net.UnixConn).ReadMsgUnix(nil, oob)
-		if err != nil {
-			return fmt.Errorf("unable to ReadMsgUnix on socket fd: %v", err)
-		}
-
-		oob = oob[:oobn]
-		scm, err := syscall.ParseSocketControlMessage(oob)
-		if err != nil {
-			return fmt.Errorf("unable to ParseSocketControlMessage from message received on socket fd: %v", err)
-		}
-
-		ucred, err := syscall.ParseUnixCredentials(&scm[0])
-		if err != nil {
-			return fmt.Errorf("unable to ParseUnixCredentials from message received on socket fd: %v", err)
-		}
-
-		err = syscall.Kill(int(ucred.Pid), syscall.SIGHUP)
-		if err != nil {
+		if err := syscall.Kill(int(pid), syscall.SIGHUP); err != nil {
 			return fmt.Errorf("unable to send SIGHUP to 'containerd' process: %v", err)
 		}
-
 		return nil
 	}
 
 	// Try to send a SIGHUP up to maxReloadAttempts times
 	var err error
 	for i := 0; i < maxReloadAttempts; i++ {
-		err = retriable()
+		err = tryKillContainerd()
 		if err == nil {
 			break
 		}
